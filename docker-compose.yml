@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: acidentes-db
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: acidentes
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+    volumes:
+      - acidentes_pgdata:/var/lib/postgresql/data
+    networks:
+      - acidentes-net
+
+volumes:
+  acidentes_pgdata:
+
+networks:
+  acidentes-net:
