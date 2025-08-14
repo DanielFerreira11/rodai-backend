@@ -19,6 +19,19 @@ public interface EstatisticasRepository extends JpaRepository<AcidenteModel, Str
             "FROM AcidenteModel a GROUP BY a.uf ORDER BY COUNT(a) DESC")
     List<AcidentesPorUFDTO> contarAcidentesPorUF();
 
+    // EstatisticasRepository.java
+
+    @Query("""
+    SELECT new br.edu.ufcg.rodai.dto.AcidentesPorUFDTO(a.uf, COUNT(a))
+    FROM AcidenteModel a
+    WHERE a.ano BETWEEN :anoInicio AND :anoFim
+    GROUP BY a.uf
+    ORDER BY COUNT(a) DESC
+    """)
+    List<AcidentesPorUFDTO> contarAcidentesPorUFNoPeriodo(@Param("anoInicio") Integer anoInicio,
+                                                          @Param("anoFim") Integer anoFim);
+
+
     @Query("""
     SELECT new br.edu.ufcg.rodai.dto.VitimasFataisPorAnoDTO(a.ano, SUM(e.mortos)) 
     FROM AcidenteModel a 

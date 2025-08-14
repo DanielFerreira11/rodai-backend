@@ -34,19 +34,31 @@ public class EstatisticasController {
         return estatisticasRepository.contarAcidentesPorAno();
     }
 
+    // EstatisticasController.java
+
     /**
-     * Retorna o número total de acidentes por estado (UF).
+     * Total de acidentes por UF em um período.
+     * Se anoInicio/anoFim não forem informados, devolve o total histórico (LEGADO).
      *
-     * Pode ser usado para comparações regionais.
-     *
-     * Exemplo:
-     * GET /api/estatisticas/acidentes-por-uf
+     * Exemplos:
+     *   GET /api/estatisticas/acidentes-por-uf?anoInicio=2015&anoFim=2020
+     *   GET /api/estatisticas/acidentes-por-uf             (legado, total histórico)
      */
     @GetMapping("/acidentes-por-uf")
-    @Operation(summary = "Total de acidentes por UF")
-    public List<AcidentesPorUFDTO> acidentesPorUF() {
+    @Operation(summary = "Total de acidentes por UF em um período")
+    public List<AcidentesPorUFDTO> acidentesPorUF(
+            @RequestParam(required = false) Integer anoInicio,
+            @RequestParam(required = false) Integer anoFim
+    ) {
+        if (anoInicio != null && anoFim != null) {
+            return estatisticasRepository.contarAcidentesPorUFNoPeriodo(anoInicio, anoFim);
+        }
+        // LEGADO: mantém o comportamento antigo quando os anos não são enviados
         return estatisticasRepository.contarAcidentesPorUF();
     }
+
+
+
 
     /**
      * Retorna o total de mortos por ano com filtros opcionais.
