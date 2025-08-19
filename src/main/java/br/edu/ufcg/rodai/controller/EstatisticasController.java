@@ -3,47 +3,132 @@ package br.edu.ufcg.rodai.controller;
 import br.edu.ufcg.rodai.dto.*;
 import br.edu.ufcg.rodai.repository.EstatisticasRepository;
 import io.swagger.v3.oas.annotations.Operation;
-import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @RestController
 @RequestMapping("/api/estatisticas")
 public class EstatisticasController {
 
-    private final EstatisticasRepository estatisticasRepository;
+    private final EstatisticasRepository repo;
+    private final JdbcTemplate jdbc;
 
-    public EstatisticasController(EstatisticasRepository estatisticasRepository) {
-        this.estatisticasRepository = estatisticasRepository;
+    // cache da detecção do tipo de coluna
+    private volatile Boolean municipioIsBytea = null;
+
+    public EstatisticasController(EstatisticasRepository repo, JdbcTemplate jdbc) {
+        this.repo = repo;
+        this.jdbc = jdbc;
     }
 
+    /** Detecta uma vez se a coluna acidente.municipio é BYTEA. */
+    private boolean isMunicipioBytea() {
+        if (municipioIsBytea != null) return municipioIsBytea;
+        try {
+            String sql = """
+                select data_type
+                from information_schema.columns
+                where table_schema = current_schema()
+                  and table_name = 'acidente'
+                  and column_name = 'municipio'
+                """;
+            String dt = jdbc.queryForObject(sql, String.class);
+            municipioIsBytea = dt != null && dt.equalsIgnoreCase("bytea");
+        } catch (Exception e) {
+            // fallback conservador: assume TEXT
+            municipioIsBytea = false;
+        }
+        return municipioIsBytea;
+    }
+
+    // ---------------------------------------------------------------------
+    // SÉRIES TEMPORAIS
+    // ---------------------------------------------------------------------
+
     /**
-     * Retorna o número total de acidentes por ano.
-     *
-     * Útil para construir séries temporais gerais da quantidade de acidentes.
-     *
-     * Exemplo:
-     * GET /api/estatisticas/acidentes-por-ano
+     * Total de acidentes por ano, com filtros opcionais.
+     * Agora aceita `municipio` também.
      */
     @GetMapping("/acidentes-por-ano")
-    @Operation(summary = "Total de acidentes por ano")
-    public List<AcidentesPorAnoDTO> acidentesPorAno() {
-        return estatisticasRepository.contarAcidentesPorAno();
+    @Operation(summary = "Total de acidentes por ano (com filtros opcionais, inclusive município)")
+    public List<AcidentesPorAnoDTO> acidentesPorAno(
+            @RequestParam(required = false) String uf,
+            @RequestParam(required = false) String municipio,
+            @RequestParam(required = false) Integer anoInicio,
+            @RequestParam(required = false) Integer anoFim,
+            @RequestParam(required = false) String tipoAcidente
+    ) {
+        final boolean hasMunicipio = municipio != null && !municipio.isBlank();
+        if (!hasMunicipio) {
+            final boolean semFiltros = uf == null && anoInicio == null && anoFim == null && tipoAcidente == null;
+            if (semFiltros) return repo.contarAcidentesPorAno();
+            return repo.contarAcidentesPorAnoComFiltros(uf, anoInicio, anoFim, tipoAcidente);
+        }
+
+        // com município: escolhe a consulta compatível com o tipo da coluna
+        List<Object[]> rows = isMunicipioBytea()
+                ? repo.contarAcidentesPorAnoMunicipioBytea(uf, municipio, anoInicio, anoFim, tipoAcidente)
+                : repo.contarAcidentesPorAnoMunicipioText(uf, municipio, anoInicio, anoFim, tipoAcidente);
+
+        List<AcidentesPorAnoDTO> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) {
+            int ano = ((Number) r[0]).intValue();
+            long total = ((Number) r[1]).longValue();
+            out.add(new AcidentesPorAnoDTO(ano, total));
+        }
+        return out;
     }
 
-    // EstatisticasController.java
+    /**
+     * Acidentes com vítimas (legado).
+     */
+    @GetMapping("/acidentes-com-vitimas-por-ano")
+    @Operation(summary = "Total de acidentes com vítimas (mortos ou feridos) por ano")
+    public List<AcidentesComVitimasPorAnoDTO> acidentesComVitimasPorAno() {
+        return repo.contarVitimasPorAno();
+    }
 
     /**
-     * Total de acidentes por UF em um período.
-     * Se anoInicio/anoFim não forem informados, devolve o total histórico (LEGADO).
-     *
-     * Exemplos:
-     *   GET /api/estatisticas/acidentes-por-uf?anoInicio=2015&anoFim=2020
-     *   GET /api/estatisticas/acidentes-por-uf             (legado, total histórico)
+     * Mortos por ano (com filtros opcionais, inclusive município).
      */
+    @GetMapping("/mortos-por-ano")
+    @Operation(summary = "Número de vítimas fatais por ano (com filtros opcionais, inclusive município)")
+    public List<VitimasFataisPorAnoDTO> mortosPorAno(
+            @RequestParam(required = false) String uf,
+            @RequestParam(required = false) String municipio,
+            @RequestParam(required = false) Integer anoInicio,
+            @RequestParam(required = false) Integer anoFim,
+            @RequestParam(required = false) String tipoAcidente,
+            @RequestParam(required = false) Integer minPessoas
+    ) {
+        final boolean hasMunicipio = municipio != null && !municipio.isBlank();
+        if (!hasMunicipio) {
+            return repo.contarMortosPorAnoComFiltros(uf, anoInicio, anoFim, tipoAcidente, minPessoas);
+        }
+
+        List<Object[]> rows = isMunicipioBytea()
+                ? repo.contarMortosPorAnoMunicipioBytea(uf, municipio, anoInicio, anoFim, tipoAcidente, minPessoas)
+                : repo.contarMortosPorAnoMunicipioText(uf, municipio, anoInicio, anoFim, tipoAcidente, minPessoas);
+
+        List<VitimasFataisPorAnoDTO> out = new ArrayList<>(rows.size());
+        for (Object[] r : rows) {
+            int ano = ((Number) r[0]).intValue();
+            long total = ((Number) r[1]).longValue();
+            out.add(new VitimasFataisPorAnoDTO(ano, total));
+        }
+        return out;
+    }
+
+    // ---------------------------------------------------------------------
+    // AGREGAÇÕES POR UF
+    // ---------------------------------------------------------------------
+
     @GetMapping("/acidentes-por-uf")
     @Operation(summary = "Total de acidentes por UF em um período")
     public List<AcidentesPorUFDTO> acidentesPorUF(
@@ -51,164 +136,119 @@ public class EstatisticasController {
             @RequestParam(required = false) Integer anoFim
     ) {
         if (anoInicio != null && anoFim != null) {
-            return estatisticasRepository.contarAcidentesPorUFNoPeriodo(anoInicio, anoFim);
+            return repo.contarAcidentesPorUFNoPeriodo(anoInicio, anoFim);
         }
-        // LEGADO: mantém o comportamento antigo quando os anos não são enviados
-        return estatisticasRepository.contarAcidentesPorUF();
+        return repo.contarAcidentesPorUF();
     }
 
-
-
-
-    /**
-     * Retorna o total de mortos por ano com filtros opcionais.
-     *
-     * Parâmetros opcionais:
-     * - uf: ex. "PB"
-     * - anoInicio: ex. 2015
-     * - anoFim: ex. 2023
-     * - tipoAcidente: ex. "Colisão frontal"
-     * - minPessoas: mínimo de pessoas envolvidas, ex. 3
-     *
-     * Todos os filtros são ignorados se forem nulos.
-     *
-     * Exemplo:
-     * GET /api/estatisticas/mortos-por-ano?uf=PB&anoInicio=2018&anoFim=2023
-     */
-    @GetMapping("/mortos-por-ano")
-    @Operation(summary = "Número de vítimas fatais por ano (com filtros opcionais)")
-    public List<VitimasFataisPorAnoDTO> mortosPorAno(
-            @RequestParam(required = false) String uf,
-            @RequestParam(required = false) Integer anoInicio,
-            @RequestParam(required = false) Integer anoFim,
-            @RequestParam(required = false) String tipoAcidente,
-            @RequestParam(required = false) Integer minPessoas
-    ) {
-        return estatisticasRepository.contarMortosPorAnoComFiltros(uf, anoInicio, anoFim, tipoAcidente, minPessoas);
-    }
-
-    /**
-     * Retorna a localização (latitude/longitude) dos acidentes entre dois anos.
-     *
-     * Resultado paginado — útil para visualização em mapas.
-     *
-     * Parâmetros obrigatórios:
-     * - anoInicio: ex. 2017
-     * - anoFim: ex. 2023
-     *
-     * Parâmetros opcionais:
-     * - page: número da página (default 0)
-     * - size: tamanho da página (default 500)
-     *
-     * Exemplo:
-     * GET /api/estatisticas/localizacao?anoInicio=2020&anoFim=2023&page=0&size=1000
-     */
-    @GetMapping("/localizacao")
-    public List<LocalizacaoAcidenteDTO> getLocalizacoes(@RequestParam Integer anoInicio,
-                                                        @RequestParam Integer anoFim,
-                                                        @RequestParam(defaultValue = "0") int page,
-                                                        @RequestParam(defaultValue = "500") int size) {
-        Pageable pageable = PageRequest.of(page, size);
-        return estatisticasRepository.listarLocalizacoes(anoInicio, anoFim, pageable);
-    }
-
-    /**
-     * Retorna o número de acidentes por tipo (ex: colisão, tombamento).
-     *
-     * Filtros opcionais:
-     * - uf: ex. "PE"
-     * - anoInicio: ex. 2018
-     * - anoFim: ex. 2023
-     *
-     * Exemplo:
-     * GET /api/estatisticas/tipo-acidente?uf=PB&anoInicio=2019&anoFim=2022
-     */
-    @GetMapping("/tipo-acidente")
-    public List<TipoAcidenteDTO> obterTiposAcidentePorUF(
-            @RequestParam(required = false) String uf,
-            @RequestParam Integer anoInicio,
-            @RequestParam Integer anoFim) {
-        return estatisticasRepository.contarTipoAcidentePorUFAndAno(uf, anoInicio, anoFim);
-    }
-
-    /**
-     * Retorna o número de feridos (leves + graves) por tipo de pista.
-     *
-     * Filtros opcionais:
-     * - uf: ex. "SP"
-     * - anoInicio: ex. 2016
-     * - anoFim: ex. 2022
-     * - mortosMin: número mínimo de mortos no acidente (ex: 1)
-     *
-     * Exemplo:
-     * GET /api/estatisticas/feridos-por-tipo-pista?uf=SP&anoInicio=2019&anoFim=2023&mortosMin=2
-     */
-    @GetMapping("/feridos-por-tipo-pista")
-    public List<FeridosPorTipoPistaDTO> feridosPorTipoPista(
-            @RequestParam(required = false) String uf,
-            @RequestParam(required = false) Integer anoInicio,
-            @RequestParam(required = false) Integer anoFim,
-            @RequestParam(required = false) Integer mortosMin
-    ) {
-        return estatisticasRepository.contarFeridosPorTipoPistaComFiltros(uf, anoInicio, anoFim, mortosMin);
-    }
-
-    /**
-     * Retorna o total de vítimas fatais (mortos) por condição meteorológica.
-     *
-     * Útil para analisar como o clima afeta a gravidade dos acidentes.
-     *
-     * Parâmetros obrigatórios:
-     * - anoInicio: ex. 2015
-     * - anoFim: ex. 2023
-     *
-     * Exemplo:
-     * GET /api/estatisticas/mortos-por-condicao?anoInicio=2018&anoFim=2023
-     */
-    @GetMapping("/mortos-por-condicao")
-    @Operation(summary = "Total de vítimas fatais por condição meteorológica")
-    public List<MortesPorCondicaoDTO> mortosPorCondicao(
-            @RequestParam Integer anoInicio,
-            @RequestParam Integer anoFim
-    ) {
-        return estatisticasRepository.contarMortesPorCondicao(anoInicio, anoFim);
-    }
-
-    /**
-     * Retorna o total de vítimas fatais (mortos) por estado (UF) dentro de um período.
-     *
-     * Útil para identificar quais estados concentram maior número de mortes no trânsito.
-     *
-     * Parâmetros obrigatórios:
-     * - anoInicio: ex. 2015
-     * - anoFim: ex. 2023
-     *
-     * Exemplo:
-     * GET /api/estatisticas/mortos-por-uf?anoInicio=2018&anoFim=2023
-     */
     @GetMapping("/mortos-por-uf")
     @Operation(summary = "Total de vítimas fatais por UF em um período")
     public List<MortesPorUFDTO> mortosPorUF(
             @RequestParam Integer anoInicio,
             @RequestParam Integer anoFim
     ) {
-        return estatisticasRepository.contarMortesPorUF(anoInicio, anoFim);
+        return repo.contarMortesPorUF(anoInicio, anoFim);
+    }
+
+    // ---------------------------------------------------------------------
+    // TIPO DE ACIDENTE / CATÁLOGOS
+    // ---------------------------------------------------------------------
+
+    @GetMapping("/tipo-acidente")
+    @Operation(summary = "Contagem de acidentes por tipo (com filtros opcionais de UF e período)")
+    public List<TipoAcidenteDTO> obterTiposAcidentePorUF(
+            @RequestParam(required = false) String uf,
+            @RequestParam Integer anoInicio,
+            @RequestParam Integer anoFim
+    ) {
+        return repo.contarTipoAcidentePorUFAndAno(uf, anoInicio, anoFim);
+    }
+
+    @GetMapping("/catalogos/tipos-acidente")
+    @Operation(summary = "Lista de tipos de acidente distintos (para selects)")
+    public List<String> catalogoTiposAcidente(
+            @RequestParam(required = false) String uf,
+            @RequestParam(required = false) Integer anoInicio,
+            @RequestParam(required = false) Integer anoFim
+    ) {
+        return repo.listarTiposAcidenteDistinct(uf, anoInicio, anoFim);
     }
 
     /**
-     * Retorna o total de acidentes com vítimas (mortos + feridos) por ano.
-     *
-     * Ideal para comparar com o total geral de acidentes e verificar proporção com vítimas.
-     *
-     * Exemplo:
-     * GET /api/estatisticas/acidentes-com-vitimas-por-ano
+     * Catálogo de municípios (DISTINCT) com busca textual opcional e filtro por UF.
+     * Usa uma consulta compatível com o tipo real da coluna.
      */
-    @GetMapping("/acidentes-com-vitimas-por-ano")
-    @Operation(summary = "Total de acidentes com vítimas (mortos ou feridos) por ano")
-    public List<AcidentesComVitimasPorAnoDTO> acidentesComVitimasPorAno() {
-        return estatisticasRepository.contarVitimasPorAno();
+    @GetMapping("/catalogos/municipios")
+    @Operation(summary = "Lista de municípios distintos (para busca/combobox)")
+    public List<String> catalogoMunicipios(
+            @RequestParam(required = false) String uf,
+            @RequestParam(required = false) String q,
+            @RequestParam(defaultValue = "1000") int limit
+    ) {
+        int lim = Math.min(Math.max(limit, 1), 10000);
+        if (isMunicipioBytea()) {
+            return repo.listarMunicipiosDistinctBytea(uf, q, lim);
+        }
+        return repo.listarMunicipiosDistinctText(uf, q, lim);
     }
 
+    // ---------------------------------------------------------------------
+    // OUTRAS AGREGAÇÕES
+    // ---------------------------------------------------------------------
 
+    @GetMapping("/feridos-por-tipo-pista")
+    @Operation(summary = "Feridos (leves + graves) por tipo de pista (com filtros opcionais)")
+    public List<FeridosPorTipoPistaDTO> feridosPorTipoPista(
+            @RequestParam(required = false) String uf,
+            @RequestParam(required = false) Integer anoInicio,
+            @RequestParam(required = false) Integer anoFim,
+            @RequestParam(required = false) Integer mortosMin
+    ) {
+        return repo.contarFeridosPorTipoPistaComFiltros(uf, anoInicio, anoFim, mortosMin);
+    }
+
+    @GetMapping("/mortos-por-condicao")
+    @Operation(summary = "Total de vítimas fatais por condição meteorológica")
+    public List<MortesPorCondicaoDTO> mortosPorCondicao(
+            @RequestParam Integer anoInicio,
+            @RequestParam Integer anoFim
+    ) {
+        return repo.contarMortesPorCondicao(anoInicio, anoFim);
+    }
+
+    // ---------------------------------------------------------------------
+    // GEO (MAPA)
+    // ---------------------------------------------------------------------
+
+    @GetMapping("/localizacao")
+    @Operation(summary = "Localizações (latitude/longitude) dos acidentes em um período (paginado)")
+    public List<LocalizacaoAcidenteDTO> getLocalizacoes(@RequestParam Integer anoInicio,
+                                                        @RequestParam Integer anoFim,
+                                                        @RequestParam(defaultValue = "0") int page,
+                                                        @RequestParam(defaultValue = "500") int size) {
+        Pageable pageable = PageRequest.of(page, size);
+        return repo.listarLocalizacoes(anoInicio, anoFim, pageable);
+    }
+
+    // ---------------------------------------------------------------------
+    // TOP MUNICÍPIOS (mapa/modal)
+    // ---------------------------------------------------------------------
+
+    @GetMapping("/top-municipios")
+    @Operation(summary = "Top municípios por UF/período, por acidentes ou mortos")
+    public List<MunicipioQuantidadeDTO> topMunicipios(
+            @RequestParam String uf,
+            @RequestParam(required = false) Integer anoInicio,
+            @RequestParam(required = false) Integer anoFim,
+            @RequestParam(required = false) String tipoAcidente,
+            @RequestParam(defaultValue = "acidentes") String metric,
+            @RequestParam(defaultValue = "10") int limit
+    ) {
+        int size = Math.min(Math.max(limit, 1), 100);
+        Pageable p = PageRequest.of(0, size);
+        if ("mortos".equalsIgnoreCase(metric)) {
+            return repo.topMunicipiosPorMortos(uf, anoInicio, anoFim, tipoAcidente, p);
+        }
+        return repo.topMunicipiosPorAcidentes(uf, anoInicio, anoFim, tipoAcidente, p);
+    }
 }
-
